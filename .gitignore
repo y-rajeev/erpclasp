@@ -1,0 +1,26 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Local credentials (do not commit)
+.erpclasp.json
+.env
+.erpclasp-map.json
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+
+# Files
+scripts/
