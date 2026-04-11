@@ -1,4 +1,4 @@
-# Virtual environments
+# venv
 .venv/
 venv/
 env/
@@ -10,17 +10,25 @@ __pycache__/
 .eggs/
 dist/
 build/
+*.egg
 
-# Local credentials (do not commit)
-.erpclasp.json
+# tooling / coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# credentials & local sync
 .env
+.erpclasp.json
 .erpclasp-map.json
+scripts/
 
-# Editor / OS
+# editor / os
 .idea/
 .vscode/
 *.swp
+.DS_Store
 Thumbs.db
-
-# Files
-scripts/

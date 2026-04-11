@@ -38,6 +38,7 @@ from erpclasp.sync import (
 from erpclasp.utils import (
     MAP_FILENAME,
     display_path_under_project,
+    find_project_root,
     require_project_root,
     scripts_dir,
 )
@@ -141,7 +142,7 @@ def login_cmd(
     ] = False,
 ) -> None:
     """Verify credentials, save them to `.env`, and write a marker `.erpclasp.json` (no secrets in JSON)."""
-    project_root = Path.cwd()
+    project_root = find_project_root() or Path.cwd()
 
     url = credential_from_flag_or_env(base_url, *ENV_KEYS_BASE_URL)
     key = credential_from_flag_or_env(api_key, *ENV_KEYS_API_KEY)
@@ -229,7 +230,7 @@ def init_cmd(
     ] = False,
 ) -> None:
     """Create `scripts/` and `.erpclasp-map.json` if missing."""
-    project_root = Path.cwd()
+    project_root = find_project_root() or Path.cwd()
     sdir = scripts_dir(project_root)
     sdir.mkdir(parents=True, exist_ok=True)
     map_path = project_root / MAP_FILENAME
