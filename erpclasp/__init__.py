@@ -14,6 +14,7 @@ from erpclasp.sync import (
     register_script,
     resolve_scripts_file,
     save_mapping,
+    unmapped_local_scripts,
 )
 from erpclasp.utils import find_project_root, require_project_root, scripts_dir
 
@@ -38,4 +39,5 @@ __all__ = [
     "resolve_scripts_file",
     "save_mapping",
     "scripts_dir",
+    "unmapped_local_scripts",
 ]

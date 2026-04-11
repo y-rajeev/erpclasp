@@ -27,9 +27,20 @@ from erpclasp.config import (
     persist_credentials_to_env,
     write_project_marker,
 )
-from erpclasp.diff import diff_against_remote, render_diffs
-from erpclasp.sync import load_mapping, pull_scripts, push_scripts, register_script
-from erpclasp.utils import MAP_FILENAME, require_project_root, scripts_dir
+from erpclasp.diff import diff_against_remote, render_diffs, render_status
+from erpclasp.sync import (
+    load_mapping,
+    pull_scripts,
+    push_scripts,
+    register_script,
+    unmapped_local_scripts,
+)
+from erpclasp.utils import (
+    MAP_FILENAME,
+    display_path_under_project,
+    require_project_root,
+    scripts_dir,
+)
 from erpclasp.watcher import DEFAULT_DEBOUNCE_MS, watch_scripts
 
 app = typer.Typer(
@@ -437,6 +448,63 @@ def diff_cmd(
         raise typer.Exit(1) from exc
 
     render_diffs(Console(), entries)
+    if any(e.error or not e.identical for e in entries):
+        raise typer.Exit(1)
+
+
+@app.command("status")
+def status_cmd(
+    show_all: Annotated[
+        bool,
+        typer.Option(
+            "--all",
+            "-a",
+            help="List every mapped file, including clean (in sync with the server).",
+        ),
+    ] = False,
+) -> None:
+    """Show mapped scripts that differ from the server (need push), or use --all for the full list."""
+    root, cfg = _get_project_and_config()
+    client = FrappeClient(cfg)
+    sdir = scripts_dir(root)
+    unmapped = unmapped_local_scripts(root)
+
+    mapping = load_mapping(root)
+    if not mapping:
+        console.print(
+            f"[yellow]No entries in {MAP_FILENAME}.[/yellow] "
+            "Run [dim]erpclasp pull[/dim] or [dim]erpclasp add[/dim]."
+        )
+        if unmapped:
+            render_status(
+                console,
+                [],
+                unmapped=unmapped,
+                scripts_label=display_path_under_project(root, sdir),
+                base_url=cfg.base_url,
+                show_all=show_all,
+            )
+        else:
+            console.print(f"[dim]No .py files in[/dim] {sdir}")
+        raise typer.Exit(0)
+
+    try:
+        entries = diff_against_remote(client, root, build_unified_diff=False)
+    except (FrappeAPIError, ValueError, FileNotFoundError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    except requests.RequestException as exc:
+        console.print(f"[red]Network error:[/red] {exc}")
+        raise typer.Exit(1) from exc
+
+    render_status(
+        console,
+        entries,
+        unmapped=unmapped,
+        scripts_label=display_path_under_project(root, sdir),
+        base_url=cfg.base_url,
+        show_all=show_all,
+    )
     if any(e.error or not e.identical for e in entries):
         raise typer.Exit(1)
 

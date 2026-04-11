@@ -8,6 +8,7 @@ from pathlib import Path
 
 from rich.console import Console, Group
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 from erpclasp.api import FrappeAPIError, FrappeClient
@@ -46,6 +47,7 @@ def diff_against_remote(
     project_root: Path,
     *,
     only_files: list[str] | None = None,
+    build_unified_diff: bool = True,
 ) -> list[DiffEntry]:
     """Build unified diffs for mapped ``scripts/*.py`` files."""
     sdir = scripts_dir(project_root)
@@ -113,16 +115,17 @@ def diff_against_remote(
         local_lines = local_text.splitlines()
         remote_lines = remote_text.splitlines()
         identical = local_lines == remote_lines
-        lines = (
-            []
-            if identical
-            else _unified_diff(
+        if identical:
+            lines: list[str] = []
+        elif build_unified_diff:
+            lines = _unified_diff(
                 local_lines,
                 remote_lines,
                 from_name=f"local:{filename}",
                 to_name=f"remote:{erp_name}",
             )
-        )
+        else:
+            lines = []
         entries.append(
             DiffEntry(
                 filename=filename,
@@ -159,3 +162,101 @@ def render_diffs(console: Console, entries: list[DiffEntry]) -> None:
             else:
                 text.append(line + "\n")
         console.print(Panel(Group(text), title=title, border_style="yellow"))
+
+
+def _status_row_style(e: DiffEntry) -> tuple[str, str]:
+    if e.error:
+        return "[red]error[/red]", e.error
+    if e.identical:
+        return "[green]clean[/green]", ""
+    return "[yellow]modified[/yellow]", "local ≠ server"
+
+
+def render_status(
+    console: Console,
+    entries: list[DiffEntry],
+    *,
+    unmapped: list[str],
+    scripts_label: str,
+    base_url: str | None = None,
+    show_all: bool = False,
+) -> None:
+    """Print local vs server: by default only rows that need attention (push or fix)."""
+    header = f"Local scripts vs server — {scripts_label}"
+    if base_url:
+        header += f"\n[dim]{base_url}[/dim]"
+    console.print(header)
+    console.print()
+
+    if show_all:
+        show_notes = bool(unmapped) or any(e.error or not e.identical for e in entries)
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Status")
+        table.add_column("File")
+        table.add_column("Server script")
+        if show_notes:
+            table.add_column("Notes")
+        for e in entries:
+            st, notes = _status_row_style(e)
+            if show_notes:
+                table.add_row(st, e.filename, e.erp_name, notes)
+            else:
+                table.add_row(st, e.filename, e.erp_name)
+        for name in unmapped:
+            table.add_row(
+                "[dim]unmapped[/dim]",
+                name,
+                "—",
+                f"not in {MAP_FILENAME} (run erpclasp add)",
+            )
+        console.print(table)
+        return
+
+    if not entries and unmapped:
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Status")
+        table.add_column("File")
+        table.add_column("Server script")
+        table.add_column("Notes")
+        for name in unmapped:
+            table.add_row(
+                "[dim]unmapped[/dim]",
+                name,
+                "—",
+                f"not in {MAP_FILENAME} (run erpclasp add)",
+            )
+        console.print(table)
+        return
+
+    pending = [e for e in entries if e.error or not e.identical]
+
+    if pending:
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Status")
+        table.add_column("File")
+        table.add_column("Server script")
+        table.add_column("Notes")
+        for e in pending:
+            st, notes = _status_row_style(e)
+            table.add_row(st, e.filename, e.erp_name, notes)
+        console.print(table)
+    elif entries:
+        console.print(
+            "[green]Nothing to push — all mapped scripts match the server.[/green]"
+        )
+
+    if unmapped:
+        if pending or entries:
+            console.print()
+        console.print(
+            f"[yellow]Unmapped[/yellow] .py files (not in {MAP_FILENAME}): "
+            f"[cyan]{', '.join(unmapped)}[/cyan]"
+        )
+        console.print(
+            f"[dim]Map with[/dim] [cyan]erpclasp add <file> --name \"…\"[/cyan] "
+            f"[dim]then push.[/dim]"
+        )
+    elif not pending and not entries:
+        console.print(
+            "[green]Nothing to push — all mapped scripts match the server.[/green]"
+        )

@@ -67,5 +67,13 @@ def scripts_dir(root: Path) -> Path:
     return root / SCRIPTS_DIRNAME
 
 
+def display_path_under_project(project_root: Path, path: Path) -> str:
+    """Short label for CLI output: path relative to project, else the original path string."""
+    try:
+        return path.resolve().relative_to(project_root.resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def backup_dir(scripts_root: Path) -> Path:
     return scripts_root / BACKUP_DIRNAME

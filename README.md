@@ -1,6 +1,6 @@
 # erpclasp
 
-Python **library** and **CLI** to **pull**, **push**, **diff**, and **watch** [ERPNext](https://erpnext.com/) **Server Scripts** on [Frappe Cloud](https://frappecloud.com/) (or any Frappe site) using the REST API—similar in spirit to [clasp](https://github.com/google/clasp) for Apps Script.
+Python **library** and **CLI** to **pull**, **push**, **diff**, **status**, and **watch** [ERPNext](https://erpnext.com/) **Server Scripts** on [Frappe Cloud](https://frappecloud.com/) (or any Frappe site) using the REST API—similar in spirit to [clasp](https://github.com/google/clasp) for Apps Script.
 
 ## Requirements
 
@@ -86,7 +86,7 @@ Run these from the directory you want to use as the project root (where `.env` a
 
    No prompts if all three variables are set. You can override any value with `--base-url`, `--api-key`, or `--api-secret`.
 
-   **`pull` / `push` / `diff` / `watch`** read credentials from **`.env`** first. Older projects may still have keys only in `.erpclasp.json`; that still works until you run `login` again (which migrates toward `.env`-only).
+   **`pull` / `push` / `diff` / `status` / `watch`** read credentials from **`.env`** first. Older projects may still have keys only in `.erpclasp.json`; that still works until you run `login` again (which migrates toward `.env`-only).
 
    - **`erpclasp login --skip-ping`** — if `frappe.ping` is blocked but credentials are valid.
    - **Windows / interactive only:** hidden secret prompts often block paste — use **`--plain-secret-prompt`**, **`--api-secret-file path.txt`**, or rely on **`API_SECRET` in `.env`** (recommended).
@@ -139,7 +139,16 @@ Run these from the directory you want to use as the project root (where `.env` a
 
    Exits with status **1** if there are differences or errors (useful in CI).
 
-7. **Watch** for saves and auto-push (debounced):
+7. **Status** — what needs a **push** (or fix): by default only **modified** (local ≠ server) and **error** rows; if everything matches, prints a short “nothing to push” line. **Unmapped** `.py` files (not in `.erpclasp-map.json`) are listed separately when present.
+
+   ```bash
+   erpclasp status
+   erpclasp status --all   # every mapped file, including clean (full audit)
+   ```
+
+   Exits **1** if any mapped script is modified or errored; **0** when all mapped files are clean (unmapped files alone do not fail the exit code).
+
+8. **Watch** for saves and auto-push (debounced):
 
    ```bash
    erpclasp watch

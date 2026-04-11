@@ -66,6 +66,19 @@ def register_script(
     return dest
 
 
+def unmapped_local_scripts(project_root: Path) -> list[str]:
+    """Basenames of ``scripts/*.py`` not listed in ``.erpclasp-map.json``."""
+    mapping = load_mapping(project_root)
+    sdir = scripts_dir(project_root)
+    if not sdir.is_dir():
+        return []
+    return sorted(
+        p.name
+        for p in sdir.iterdir()
+        if p.is_file() and p.suffix.lower() == ".py" and p.name not in mapping
+    )
+
+
 def load_mapping(project_root: Path) -> dict[str, str]:
     """Load ``filename -> ERP script name`` mapping."""
     path = map_path(project_root)
