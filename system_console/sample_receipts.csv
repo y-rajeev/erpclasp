@@ -1,0 +1,7 @@
+receipt_type,supplier_name,posting_date,item_code,warehouse,qty_after_transaction,received_qty,accepted_qty,rejected_qty
+Purchase,Sapphire Weaves,2026-04-17,FA-04901,Finished Goods - Govandi - SLPL,453.5,453.5,453.5,0.0
+Subcontracting,Jairama Process,2026-04-16,FA-90215,Raw Materials - KAR - SLPL,514.32,508.6,508.6,0.0
+Subcontracting,Jairama Process,2026-04-16,FA-90214,Raw Materials - KAR - SLPL,513.44,507.8,507.8,0.0
+Subcontracting,Jairama Process,2026-04-16,FA-90213,Raw Materials - KAR - SLPL,739.57,720.2,720.2,0.0
+Subcontracting,Jairama Process,2026-04-16,FA-90211,Raw Materials - KAR - SLPL,492.51,492.5,492.5,0.0
+Subcontracting,A K A TRADERS,2026-03-07,FA-008001,Raw Materials - KAR - SLPL,531.74,251.3,251.3,0.0
