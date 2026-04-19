@@ -1,4 +1,4 @@
-"""Terminal receipt report mirrored by system_console/receipts_report.sql."""
+"""Terminal receipt report mirrored by system_console/erpnext_purchase_receipts.sql."""
 
 from __future__ import annotations
 
@@ -25,6 +25,9 @@ DEFAULT_FIELDS = [
     "received_qty",
     "accepted_qty",
     "rejected_qty",
+    "billed_qty",
+    "elongation",
+    "process_loss",
     "warehouse",
     "qty_after_transaction",
 ]
@@ -37,11 +40,12 @@ RECEIPT_TYPE_LABELS = {
     "Purchase Receipt": "Purchase",
     "Subcontracting Receipt": "Subcontracting",
 }
+_HAS_WARNED_BILLING_PERMISSION = False
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Fetch Purchase Receipt rows from ERPNext and print them in the terminal.",
+        description="Fetch Purchase Reports rows from ERPNext and print them in the terminal.",
     )
     parser.add_argument(
         "--project-root",
@@ -191,6 +195,26 @@ def fetch_receipt_rows_for_doctype(
             doctype_name,
             str(receipt_name),
         )
+        elongation_quantities: dict[str, float] = {}
+        process_loss_quantities: dict[str, float] = {}
+        if doctype_name == "Subcontracting Receipt":
+            related_stock_entries = fetch_related_stock_entries_for_subcontracting_receipt(
+                session,
+                base_url,
+                str(receipt_name),
+            )
+            elongation_quantities = resolve_elongation_quantities(related_stock_entries)
+            process_loss_quantities = resolve_process_loss_quantities(
+                detail,
+                related_stock_entries,
+            )
+        billed_quantities = {}
+        if doctype_name == "Purchase Receipt":
+            billed_quantities = fetch_billed_quantities_for_purchase_receipt(
+                session,
+                base_url,
+                str(receipt_name),
+            )
         items = detail.get("items")
         if not isinstance(items, list) or not items:
             detailed_rows.append(normalized_row)
@@ -209,6 +233,9 @@ def fetch_receipt_rows_for_doctype(
                     "received_qty": received_qty,
                     "accepted_qty": resolve_accepted_qty(item, received_qty, rejected_qty),
                     "rejected_qty": rejected_qty,
+                    "billed_qty": resolve_billed_qty(doctype_name, item, billed_quantities),
+                    "elongation": resolve_item_quantity(item, elongation_quantities),
+                    "process_loss": resolve_item_quantity(item, process_loss_quantities),
                 }
             )
     return detailed_rows
@@ -371,6 +398,211 @@ def fetch_stock_balances_for_receipt(
     return balances
 
 
+def fetch_billed_quantities_for_purchase_receipt(
+    session: requests.Session,
+    base_url: str,
+    receipt_name: str,
+) -> dict[str, float]:
+    global _HAS_WARNED_BILLING_PERMISSION
+    doctype = quote("Purchase Invoice Item", safe="")
+    url = f"{base_url}/api/resource/{doctype}"
+    params = {
+        "fields": json.dumps(["pr_detail", "qty"]),
+        "filters": json.dumps(
+            [
+                ["purchase_receipt", "=", receipt_name],
+                ["docstatus", "=", 1],
+            ]
+        ),
+        "limit_page_length": 1000,
+    }
+    response = session.get(url, params=params, timeout=DEFAULT_TIMEOUT)
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        if response.status_code == 403:
+            if not _HAS_WARNED_BILLING_PERMISSION:
+                print(
+                    "Warning: API user cannot read Purchase Invoice Item. "
+                    "Billing columns will be blank.",
+                    file=sys.stderr,
+                )
+                _HAS_WARNED_BILLING_PERMISSION = True
+            return {}
+        raise exc
+    payload = response.json()
+    data = payload.get("data")
+    if not isinstance(data, list):
+        raise SystemExit("Unexpected ERPNext response: missing purchase invoice item data.")
+
+    billed_quantities: dict[str, float] = {}
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        receipt_item_name = row.get("pr_detail")
+        if not receipt_item_name:
+            continue
+        billed_quantities[str(receipt_item_name)] = (
+            billed_quantities.get(str(receipt_item_name), 0.0)
+            + coerce_number(row.get("qty"))
+        )
+    return billed_quantities
+
+
+def fetch_related_stock_entries_for_subcontracting_receipt(
+    session: requests.Session,
+    base_url: str,
+    receipt_name: str,
+) -> list[dict[str, Any]]:
+    doctype = quote("Stock Entry", safe="")
+    url = f"{base_url}/api/resource/{doctype}"
+    params = {
+        "fields": json.dumps(["name", "stock_entry_type", "remarks"]),
+        "filters": json.dumps(
+            [
+                ["custom_subcontracting_receipt", "=", receipt_name],
+                ["docstatus", "=", 1],
+                ["stock_entry_type", "in", ["Elongation", "Process Loss"]],
+            ]
+        ),
+        "limit_page_length": 1000,
+    }
+    response = session.get(url, params=params, timeout=DEFAULT_TIMEOUT)
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("data")
+    if not isinstance(data, list):
+        raise SystemExit("Unexpected ERPNext response: missing stock entry data.")
+
+    detailed_entries: list[dict[str, Any]] = []
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        stock_entry_name = row.get("name")
+        if not stock_entry_name:
+            continue
+        detailed_entries.append(
+            fetch_receipt_detail(session, base_url, "Stock Entry", str(stock_entry_name))
+        )
+    return detailed_entries
+
+
+def resolve_elongation_quantities(
+    stock_entries: list[dict[str, Any]],
+) -> dict[str, float]:
+    quantities: dict[str, float] = {}
+    for entry in stock_entries:
+        if entry.get("stock_entry_type") != "Elongation":
+            continue
+        items = entry.get("items")
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_code = item.get("item_code")
+            if not item_code:
+                continue
+            quantities[str(item_code)] = quantities.get(str(item_code), 0.0) + coerce_number(
+                item.get("qty")
+            )
+    return quantities
+
+
+def resolve_process_loss_quantities(
+    receipt_detail: dict[str, Any],
+    stock_entries: list[dict[str, Any]],
+) -> dict[str, float]:
+    expected_rows = build_expected_process_loss_rows(receipt_detail)
+    quantities: dict[str, float] = {}
+    for entry in stock_entries:
+        if entry.get("stock_entry_type") != "Process Loss":
+            continue
+        items = entry.get("items")
+        if not isinstance(items, list):
+            continue
+        expected_index = 0
+        for item in sort_child_rows(items):
+            if not isinstance(item, dict):
+                continue
+            rm_item_code = item.get("item_code")
+            if not rm_item_code:
+                continue
+            loss_qty = coerce_number(item.get("qty"))
+            if loss_qty <= 0:
+                continue
+            matched_index = find_expected_process_loss_index(
+                expected_rows,
+                str(rm_item_code),
+                expected_index,
+            )
+            if matched_index is None:
+                continue
+            fg_item_code = expected_rows[matched_index]["fg_item_code"]
+            quantities[fg_item_code] = quantities.get(fg_item_code, 0.0) + loss_qty
+            expected_index = matched_index + 1
+    return quantities
+
+
+def build_expected_process_loss_rows(
+    receipt_detail: dict[str, Any],
+) -> list[dict[str, str]]:
+    supplied_items = receipt_detail.get("supplied_items")
+    if not isinstance(supplied_items, list):
+        return []
+
+    supplied_by_fg: dict[str, list[dict[str, Any]]] = {}
+    for row in sort_child_rows(supplied_items):
+        if not isinstance(row, dict):
+            continue
+        fg_item_code = row.get("main_item_code")
+        rm_item_code = row.get("rm_item_code")
+        if not fg_item_code or not rm_item_code:
+            continue
+        supplied_by_fg.setdefault(str(fg_item_code), []).append(row)
+
+    expected_rows: list[dict[str, str]] = []
+    receipt_items = receipt_detail.get("items")
+    if not isinstance(receipt_items, list):
+        return expected_rows
+
+    for fg_row in sort_child_rows(receipt_items):
+        if not isinstance(fg_row, dict):
+            continue
+        fg_item_code = fg_row.get("item_code")
+        if not fg_item_code:
+            continue
+        for rm_row in supplied_by_fg.get(str(fg_item_code), []):
+            expected_rows.append(
+                {
+                    "fg_item_code": str(fg_item_code),
+                    "rm_item_code": str(rm_row.get("rm_item_code", "")),
+                }
+            )
+    return expected_rows
+
+
+def find_expected_process_loss_index(
+    expected_rows: list[dict[str, str]],
+    rm_item_code: str,
+    start_index: int,
+) -> int | None:
+    for index in range(start_index, len(expected_rows)):
+        if expected_rows[index]["rm_item_code"] == rm_item_code:
+            return index
+    return None
+
+
+def sort_child_rows(rows: list[Any]) -> list[Any]:
+    return sorted(
+        rows,
+        key=lambda row: (
+            int(row.get("idx") or 0) if isinstance(row, dict) else 0,
+            str(row.get("name", "")) if isinstance(row, dict) else "",
+        ),
+    )
+
+
 def resolve_qty_after_transaction(
     item: dict[str, Any],
     stock_balances: dict[str, Any],
@@ -379,6 +611,36 @@ def resolve_qty_after_transaction(
     if item_name in stock_balances:
         return stock_balances[item_name]
     return ""
+
+
+def coerce_number(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def resolve_billed_qty(
+    doctype_name: str,
+    item: dict[str, Any],
+    billed_quantities: dict[str, float],
+) -> Any:
+    if doctype_name != "Purchase Receipt":
+        return ""
+    if not billed_quantities:
+        return ""
+    item_name = str(item.get("name", ""))
+    return billed_quantities.get(item_name, 0.0)
+
+
+def resolve_item_quantity(
+    item: dict[str, Any],
+    quantities_by_item_code: dict[str, float],
+) -> Any:
+    item_code = str(item.get("item_code", ""))
+    if not item_code or not quantities_by_item_code:
+        return ""
+    return quantities_by_item_code.get(item_code, 0.0)
 
 
 def print_table(rows: list[dict[str, Any]], fields: list[str]) -> None:
