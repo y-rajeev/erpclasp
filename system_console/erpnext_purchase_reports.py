@@ -1,4 +1,4 @@
-"""Terminal receipt report mirrored by system_console/erpnext_purchase_receipts.sql."""
+"""Terminal receipt report mirrored by system_console/erpnext_purchase_reports.sql."""
 
 from __future__ import annotations
 
