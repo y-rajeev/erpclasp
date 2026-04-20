@@ -23,6 +23,7 @@ DEFAULT_FIELDS = [
     "custom_lot_no",
     "posting_date",
     "item_code",
+    "description",
     "received_qty",
     "accepted_qty",
     "rejected_qty",
@@ -294,6 +295,7 @@ def fetch_receipt_rows_for_doctype(
                 {
                     **normalized_row,
                     "item_code": item.get("item_code", ""),
+                    "description": item.get("description", ""),
                     "warehouse": item.get("warehouse", ""),
                     # "qty_after_transaction": resolve_qty_after_transaction(item, stock_balances),
                     "received_qty": received_qty,
