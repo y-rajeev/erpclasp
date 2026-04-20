@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import sys
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -29,23 +30,44 @@ DEFAULT_FIELDS = [
     "elongation",
     "process_loss",
     "warehouse",
-    "qty_after_transaction",
+    # "qty_after_transaction",  # disabled - re-enable when the SLE fetch is re-enabled
 ]
 DEFAULT_LIMIT = 20
 DEFAULT_TIMEOUT = (10, 60)
 DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_SQL_FILE = Path(__file__).with_suffix(".sql")
 SUBMITTED_FILTER = ["docstatus", "=", 1]
 RECEIPT_DOCTYPES = ("Purchase Receipt", "Subcontracting Receipt")
 RECEIPT_TYPE_LABELS = {
     "Purchase Receipt": "Purchase",
     "Subcontracting Receipt": "Subcontracting",
 }
+_PARENT_FIELDS = [
+    "name",
+    "supplier_name",
+    "supplier_delivery_note",
+    "custom_lot_no",
+    "posting_date",
+]
+_SUBCONTRACTING_STOCK_ENTRY_TYPES = ["Elongation", "Process Loss"]
+_API_PAGE_LIMIT = 1000
 _HAS_WARNED_BILLING_PERMISSION = False
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Fetch Purchase Reports rows from ERPNext and print them in the terminal.",
+        description=(
+            "Fetch Purchase Reports rows from ERPNext via API and print them in the terminal."
+        ),
+    )
+    parser.add_argument(
+        "sql_file",
+        nargs="?",
+        default=str(DEFAULT_SQL_FILE),
+        help=(
+            "Reference SQL file mirrored by this script. The file is validated for convenience, "
+            "but the query itself is executed through ERPNext REST APIs."
+        ),
     )
     parser.add_argument(
         "--project-root",
@@ -96,14 +118,18 @@ def parse_filters(raw_filters: str) -> list[Any]:
 
 
 def ensure_submitted_filter(filters: list[Any]) -> list[Any]:
-    for entry in filters:
-        if (
-            isinstance(entry, list)
-            and len(entry) >= 3
-            and str(entry[0]) == "docstatus"
-        ):
-            return filters
-    return [SUBMITTED_FILTER, *filters]
+    has_docstatus = any(
+        isinstance(entry, list) and len(entry) >= 3 and str(entry[0]) == "docstatus"
+        for entry in filters
+    )
+    return filters if has_docstatus else [SUBMITTED_FILTER, *filters]
+
+
+def validate_sql_file(sql_file: str) -> Path:
+    path = Path(sql_file).expanduser().resolve()
+    if not path.is_file():
+        raise SystemExit(f"SQL file not found: {path}")
+    return path
 
 
 def build_session(base_url: str, api_key: str, api_secret: str) -> requests.Session:
@@ -117,26 +143,79 @@ def build_session(base_url: str, api_key: str, api_secret: str) -> requests.Sess
     return session
 
 
+def _resource_url(base_url: str, doctype_name: str, docname: str | None = None) -> str:
+    url = f"{base_url}/api/resource/{quote(doctype_name, safe='')}"
+    if docname is not None:
+        url = f"{url}/{quote(docname, safe='')}"
+    return url
+
+
+def _api_get_list(
+    session: requests.Session,
+    base_url: str,
+    doctype_name: str,
+    *,
+    fields: list[str],
+    filters: list[Any] | None = None,
+    limit: int = _API_PAGE_LIMIT,
+    order_by: str | None = None,
+) -> list[dict[str, Any]]:
+    params: dict[str, Any] = {
+        "fields": json.dumps(fields),
+        "limit_page_length": limit,
+    }
+    if filters is not None:
+        params["filters"] = json.dumps(filters)
+    if order_by is not None:
+        params["order_by"] = order_by
+    response = session.get(
+        _resource_url(base_url, doctype_name),
+        params=params,
+        timeout=DEFAULT_TIMEOUT,
+    )
+    response.raise_for_status()
+    data = response.json().get("data")
+    if not isinstance(data, list):
+        raise SystemExit(
+            f"Unexpected ERPNext response: missing data array for {doctype_name}."
+        )
+    return [row for row in data if isinstance(row, dict)]
+
+
+def _api_get_doc(
+    session: requests.Session,
+    base_url: str,
+    doctype_name: str,
+    docname: str,
+) -> dict[str, Any]:
+    response = session.get(
+        _resource_url(base_url, doctype_name, docname),
+        timeout=DEFAULT_TIMEOUT,
+    )
+    response.raise_for_status()
+    data = response.json().get("data")
+    if not isinstance(data, dict):
+        raise SystemExit(
+            f"Unexpected ERPNext response: missing document data for {doctype_name}."
+        )
+    return data
+
+
 def fetch_purchase_receipts(
     session: requests.Session,
     base_url: str,
     filters: list[Any],
     limit: int,
 ) -> list[dict[str, Any]]:
-    detailed_rows: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     purchase_order_flags: dict[str, bool] = {}
     for doctype in RECEIPT_DOCTYPES:
-        detailed_rows.extend(
+        rows.extend(
             fetch_receipt_rows_for_doctype(
-                session,
-                base_url,
-                doctype,
-                filters,
-                limit,
-                purchase_order_flags,
+                session, base_url, doctype, filters, limit, purchase_order_flags,
             )
         )
-    detailed_rows.sort(
+    rows.sort(
         key=lambda row: (
             str(row.get("posting_date", "")),
             str(row.get("name", "")),
@@ -144,7 +223,7 @@ def fetch_purchase_receipts(
         ),
         reverse=True,
     )
-    return detailed_rows
+    return rows
 
 
 def fetch_receipt_rows_for_doctype(
@@ -155,70 +234,57 @@ def fetch_receipt_rows_for_doctype(
     limit: int,
     purchase_order_flags: dict[str, bool],
 ) -> list[dict[str, Any]]:
-    doctype = quote(doctype_name, safe="")
-    url = f"{base_url}/api/resource/{doctype}"
-    parent_fields = [
-        "name",
-        "supplier_name",
-        "supplier_delivery_note",
-        "custom_lot_no",
-        "posting_date",
-        "status",
-    ]
-    params = {
-        "fields": json.dumps(parent_fields),
-        "filters": json.dumps(filters),
-        "limit_page_length": limit,
-        "order_by": "modified desc",
-    }
-    response = session.get(url, params=params, timeout=DEFAULT_TIMEOUT)
-    response.raise_for_status()
-    payload = response.json()
-    data = payload.get("data")
-    if not isinstance(data, list):
-        raise SystemExit("Unexpected ERPNext response: missing data array.")
+    parent_rows = _api_get_list(
+        session,
+        base_url,
+        doctype_name,
+        fields=_PARENT_FIELDS,
+        filters=filters,
+        limit=limit,
+        order_by="modified desc",
+    )
 
     detailed_rows: list[dict[str, Any]] = []
-    for row in data:
-        if not isinstance(row, dict):
-            continue
-        receipt_name = row.get("name")
+    for parent_row in parent_rows:
+        receipt_name = parent_row.get("name")
         if not receipt_name:
             continue
-        detail = fetch_receipt_detail(session, base_url, doctype_name, str(receipt_name))
-        if should_skip_receipt(detail, doctype_name, session, base_url, purchase_order_flags):
+        receipt_name = str(receipt_name)
+
+        detail = _api_get_doc(session, base_url, doctype_name, receipt_name)
+        if should_skip_receipt(
+            detail, doctype_name, session, base_url, purchase_order_flags,
+        ):
             continue
-        normalized_row = normalize_parent_row(row, detail, doctype_name)
-        stock_balances = fetch_stock_balances_for_receipt(
-            session,
-            base_url,
-            doctype_name,
-            str(receipt_name),
-        )
+
+        normalized_row = normalize_parent_row(parent_row, doctype_name)
+
+        # stock_balances = fetch_stock_balances_for_receipt(
+        #     session, base_url, doctype_name, receipt_name,
+        # )  # disabled - re-enable when qty_after_transaction is re-enabled
+
         elongation_quantities: dict[str, float] = {}
         process_loss_quantities: dict[str, float] = {}
         if doctype_name == "Subcontracting Receipt":
             related_stock_entries = fetch_related_stock_entries_for_subcontracting_receipt(
-                session,
-                base_url,
-                str(receipt_name),
+                session, base_url, receipt_name,
             )
             elongation_quantities = resolve_elongation_quantities(related_stock_entries)
             process_loss_quantities = resolve_process_loss_quantities(
-                detail,
-                related_stock_entries,
+                detail, related_stock_entries,
             )
-        billed_quantities = {}
+
+        billed_quantities: dict[str, float] = {}
         if doctype_name == "Purchase Receipt":
             billed_quantities = fetch_billed_quantities_for_purchase_receipt(
-                session,
-                base_url,
-                str(receipt_name),
+                session, base_url, receipt_name,
             )
+
         items = detail.get("items")
         if not isinstance(items, list) or not items:
             detailed_rows.append(normalized_row)
             continue
+
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -229,7 +295,7 @@ def fetch_receipt_rows_for_doctype(
                     **normalized_row,
                     "item_code": item.get("item_code", ""),
                     "warehouse": item.get("warehouse", ""),
-                    "qty_after_transaction": resolve_qty_after_transaction(item, stock_balances),
+                    # "qty_after_transaction": resolve_qty_after_transaction(item, stock_balances),
                     "received_qty": received_qty,
                     "accepted_qty": resolve_accepted_qty(item, received_qty, rejected_qty),
                     "rejected_qty": rejected_qty,
@@ -250,11 +316,9 @@ def should_skip_receipt(
 ) -> bool:
     if doctype_name != "Purchase Receipt":
         return False
-
     items = detail.get("items")
     if not isinstance(items, list):
         return False
-
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -262,10 +326,7 @@ def should_skip_receipt(
         if not purchase_order:
             continue
         if is_subcontracted_purchase_order(
-            session,
-            base_url,
-            str(purchase_order),
-            purchase_order_flags,
+            session, base_url, str(purchase_order), purchase_order_flags,
         ):
             return True
     return False
@@ -279,17 +340,7 @@ def is_subcontracted_purchase_order(
 ) -> bool:
     if purchase_order_name in purchase_order_flags:
         return purchase_order_flags[purchase_order_name]
-
-    doctype = quote("Purchase Order", safe="")
-    docname = quote(purchase_order_name, safe="")
-    url = f"{base_url}/api/resource/{doctype}/{docname}"
-    response = session.get(url, timeout=DEFAULT_TIMEOUT)
-    response.raise_for_status()
-    payload = response.json()
-    data = payload.get("data")
-    if not isinstance(data, dict):
-        raise SystemExit("Unexpected ERPNext response: missing purchase order data.")
-
+    data = _api_get_doc(session, base_url, "Purchase Order", purchase_order_name)
     result = bool(data.get("is_subcontracted"))
     purchase_order_flags[purchase_order_name] = result
     return result
@@ -297,22 +348,11 @@ def is_subcontracted_purchase_order(
 
 def normalize_parent_row(
     row: dict[str, Any],
-    detail: dict[str, Any],
     doctype_name: str,
 ) -> dict[str, Any]:
-    grand_total = row.get("grand_total")
-    if grand_total in (None, ""):
-        grand_total = detail.get("grand_total", detail.get("total", ""))
-
-    rounded_total = row.get("rounded_total")
-    if rounded_total in (None, ""):
-        rounded_total = detail.get("rounded_total", grand_total)
-
     return {
         "receipt_type": RECEIPT_TYPE_LABELS.get(doctype_name, doctype_name),
         **row,
-        "grand_total": grand_total,
-        "rounded_total": rounded_total,
     }
 
 
@@ -324,77 +364,47 @@ def resolve_accepted_qty(
     accepted_qty = item.get("accepted_qty")
     if accepted_qty not in (None, ""):
         return accepted_qty
-
     try:
-        received_value = float(received_qty or 0)
-        rejected_value = float(rejected_qty or 0)
+        return float(received_qty or 0) - float(rejected_qty or 0)
     except (TypeError, ValueError):
         return accepted_qty if accepted_qty is not None else ""
-    return received_value - rejected_value
 
 
-def fetch_receipt_detail(
-    session: requests.Session,
-    base_url: str,
-    doctype_name: str,
-    receipt_name: str,
-) -> dict[str, Any]:
-    doctype = quote(doctype_name, safe="")
-    docname = quote(receipt_name, safe="")
-    url = f"{base_url}/api/resource/{doctype}/{docname}"
-    response = session.get(url, timeout=DEFAULT_TIMEOUT)
-    response.raise_for_status()
-    payload = response.json()
-    data = payload.get("data")
-    if not isinstance(data, dict):
-        raise SystemExit("Unexpected ERPNext response: missing document data.")
-    return data
-
-
+# NOTE: kept for when qty_after_transaction is re-enabled in the item row dict.
 def fetch_stock_balances_for_receipt(
     session: requests.Session,
     base_url: str,
     doctype_name: str,
     receipt_name: str,
 ) -> dict[str, Any]:
-    doctype = quote("Stock Ledger Entry", safe="")
-    url = f"{base_url}/api/resource/{doctype}"
-    params = {
-        "fields": json.dumps(
-            [
-                "voucher_detail_no",
-                "item_code",
-                "warehouse",
-                "qty_after_transaction",
-                "posting_date",
-                "posting_time",
-                "creation",
-            ]
-        ),
-        "filters": json.dumps(
-            [
-                ["voucher_type", "=", doctype_name],
-                ["voucher_no", "=", receipt_name],
-                ["is_cancelled", "=", 0],
-            ]
-        ),
-        "limit_page_length": 1000,
-        "order_by": "posting_date desc, posting_time desc, creation desc",
-    }
-    response = session.get(url, params=params, timeout=DEFAULT_TIMEOUT)
-    response.raise_for_status()
-    payload = response.json()
-    data = payload.get("data")
-    if not isinstance(data, list):
-        raise SystemExit("Unexpected ERPNext response: missing stock ledger data.")
-
+    rows = _api_get_list(
+        session,
+        base_url,
+        "Stock Ledger Entry",
+        fields=[
+            "voucher_detail_no",
+            "item_code",
+            "warehouse",
+            "qty_after_transaction",
+            "posting_date",
+            "posting_time",
+            "creation",
+        ],
+        filters=[
+            ["voucher_type", "=", doctype_name],
+            ["voucher_no", "=", receipt_name],
+            ["is_cancelled", "=", 0],
+        ],
+        order_by="posting_date desc, posting_time desc, creation desc",
+    )
     balances: dict[str, Any] = {}
-    for row in data:
-        if not isinstance(row, dict):
-            continue
+    for row in rows:
         voucher_detail_no = row.get("voucher_detail_no")
-        if voucher_detail_no and voucher_detail_no not in balances:
-            balances[str(voucher_detail_no)] = row.get("qty_after_transaction", "")
+        if not voucher_detail_no:
+            continue
+        key = str(voucher_detail_no)
+        if key not in balances:
+            balances[key] = row.get("qty_after_transaction", "")
     return balances
 
 
@@ -403,9 +413,6 @@ def fetch_billed_quantities_for_purchase_receipt(
     base_url: str,
     receipt_name: str,
 ) -> dict[str, float]:
-    global _HAS_WARNED_BILLING_PERMISSION
-    doctype = quote("Purchase Invoice Item", safe="")
-    url = f"{base_url}/api/resource/{doctype}"
     params = {
         "fields": json.dumps(["pr_detail", "qty"]),
         "filters": json.dumps(
@@ -414,39 +421,42 @@ def fetch_billed_quantities_for_purchase_receipt(
                 ["docstatus", "=", 1],
             ]
         ),
-        "limit_page_length": 1000,
+        "limit_page_length": _API_PAGE_LIMIT,
     }
-    response = session.get(url, params=params, timeout=DEFAULT_TIMEOUT)
-    try:
-        response.raise_for_status()
-    except requests.HTTPError as exc:
-        if response.status_code == 403:
-            if not _HAS_WARNED_BILLING_PERMISSION:
-                print(
-                    "Warning: API user cannot read Purchase Invoice Item. "
-                    "Billing columns will be blank.",
-                    file=sys.stderr,
-                )
-                _HAS_WARNED_BILLING_PERMISSION = True
-            return {}
-        raise exc
-    payload = response.json()
-    data = payload.get("data")
+    response = session.get(
+        _resource_url(base_url, "Purchase Invoice Item"),
+        params=params,
+        timeout=DEFAULT_TIMEOUT,
+    )
+    if response.status_code == 403:
+        _warn_billing_permission_once()
+        return {}
+    response.raise_for_status()
+    data = response.json().get("data")
     if not isinstance(data, list):
         raise SystemExit("Unexpected ERPNext response: missing purchase invoice item data.")
 
-    billed_quantities: dict[str, float] = {}
+    billed_quantities: dict[str, float] = defaultdict(float)
     for row in data:
         if not isinstance(row, dict):
             continue
         receipt_item_name = row.get("pr_detail")
         if not receipt_item_name:
             continue
-        billed_quantities[str(receipt_item_name)] = (
-            billed_quantities.get(str(receipt_item_name), 0.0)
-            + coerce_number(row.get("qty"))
-        )
-    return billed_quantities
+        billed_quantities[str(receipt_item_name)] += coerce_number(row.get("qty"))
+    return dict(billed_quantities)
+
+
+def _warn_billing_permission_once() -> None:
+    global _HAS_WARNED_BILLING_PERMISSION
+    if _HAS_WARNED_BILLING_PERMISSION:
+        return
+    print(
+        "Warning: API user cannot read Purchase Invoice Item. "
+        "Billing columns will be blank.",
+        file=sys.stderr,
+    )
+    _HAS_WARNED_BILLING_PERMISSION = True
 
 
 def fetch_related_stock_entries_for_subcontracting_receipt(
@@ -454,35 +464,24 @@ def fetch_related_stock_entries_for_subcontracting_receipt(
     base_url: str,
     receipt_name: str,
 ) -> list[dict[str, Any]]:
-    doctype = quote("Stock Entry", safe="")
-    url = f"{base_url}/api/resource/{doctype}"
-    params = {
-        "fields": json.dumps(["name", "stock_entry_type", "remarks"]),
-        "filters": json.dumps(
-            [
-                ["custom_subcontracting_receipt", "=", receipt_name],
-                ["docstatus", "=", 1],
-                ["stock_entry_type", "in", ["Elongation", "Process Loss"]],
-            ]
-        ),
-        "limit_page_length": 1000,
-    }
-    response = session.get(url, params=params, timeout=DEFAULT_TIMEOUT)
-    response.raise_for_status()
-    payload = response.json()
-    data = payload.get("data")
-    if not isinstance(data, list):
-        raise SystemExit("Unexpected ERPNext response: missing stock entry data.")
-
+    rows = _api_get_list(
+        session,
+        base_url,
+        "Stock Entry",
+        fields=["name", "stock_entry_type", "remarks"],
+        filters=[
+            ["custom_subcontracting_receipt", "=", receipt_name],
+            ["docstatus", "=", 1],
+            ["stock_entry_type", "in", _SUBCONTRACTING_STOCK_ENTRY_TYPES],
+        ],
+    )
     detailed_entries: list[dict[str, Any]] = []
-    for row in data:
-        if not isinstance(row, dict):
-            continue
+    for row in rows:
         stock_entry_name = row.get("name")
         if not stock_entry_name:
             continue
         detailed_entries.append(
-            fetch_receipt_detail(session, base_url, "Stock Entry", str(stock_entry_name))
+            _api_get_doc(session, base_url, "Stock Entry", str(stock_entry_name))
         )
     return detailed_entries
 
@@ -490,7 +489,7 @@ def fetch_related_stock_entries_for_subcontracting_receipt(
 def resolve_elongation_quantities(
     stock_entries: list[dict[str, Any]],
 ) -> dict[str, float]:
-    quantities: dict[str, float] = {}
+    quantities: dict[str, float] = defaultdict(float)
     for entry in stock_entries:
         if entry.get("stock_entry_type") != "Elongation":
             continue
@@ -503,10 +502,8 @@ def resolve_elongation_quantities(
             item_code = item.get("item_code")
             if not item_code:
                 continue
-            quantities[str(item_code)] = quantities.get(str(item_code), 0.0) + coerce_number(
-                item.get("qty")
-            )
-    return quantities
+            quantities[str(item_code)] += coerce_number(item.get("qty"))
+    return dict(quantities)
 
 
 def resolve_process_loss_quantities(
@@ -514,7 +511,7 @@ def resolve_process_loss_quantities(
     stock_entries: list[dict[str, Any]],
 ) -> dict[str, float]:
     expected_rows = build_expected_process_loss_rows(receipt_detail)
-    quantities: dict[str, float] = {}
+    quantities: dict[str, float] = defaultdict(float)
     for entry in stock_entries:
         if entry.get("stock_entry_type") != "Process Loss":
             continue
@@ -532,16 +529,14 @@ def resolve_process_loss_quantities(
             if loss_qty <= 0:
                 continue
             matched_index = find_expected_process_loss_index(
-                expected_rows,
-                str(rm_item_code),
-                expected_index,
+                expected_rows, str(rm_item_code), expected_index,
             )
             if matched_index is None:
                 continue
             fg_item_code = expected_rows[matched_index]["fg_item_code"]
-            quantities[fg_item_code] = quantities.get(fg_item_code, 0.0) + loss_qty
+            quantities[fg_item_code] += loss_qty
             expected_index = matched_index + 1
-    return quantities
+    return dict(quantities)
 
 
 def build_expected_process_loss_rows(
@@ -561,11 +556,11 @@ def build_expected_process_loss_rows(
             continue
         supplied_by_fg.setdefault(str(fg_item_code), []).append(row)
 
-    expected_rows: list[dict[str, str]] = []
     receipt_items = receipt_detail.get("items")
     if not isinstance(receipt_items, list):
-        return expected_rows
+        return []
 
+    expected_rows: list[dict[str, str]] = []
     for fg_row in sort_child_rows(receipt_items):
         if not isinstance(fg_row, dict):
             continue
@@ -603,6 +598,7 @@ def sort_child_rows(rows: list[Any]) -> list[Any]:
     )
 
 
+# NOTE: kept for when qty_after_transaction is re-enabled in the item row dict.
 def resolve_qty_after_transaction(
     item: dict[str, Any],
     stock_balances: dict[str, Any],
@@ -625,20 +621,19 @@ def resolve_billed_qty(
     item: dict[str, Any],
     billed_quantities: dict[str, float],
 ) -> Any:
-    if doctype_name != "Purchase Receipt":
+    if doctype_name != "Purchase Receipt" or not billed_quantities:
         return ""
-    if not billed_quantities:
-        return ""
-    item_name = str(item.get("name", ""))
-    return billed_quantities.get(item_name, 0.0)
+    return billed_quantities.get(str(item.get("name", "")), 0.0)
 
 
 def resolve_item_quantity(
     item: dict[str, Any],
     quantities_by_item_code: dict[str, float],
 ) -> Any:
+    if not quantities_by_item_code:
+        return ""
     item_code = str(item.get("item_code", ""))
-    if not item_code or not quantities_by_item_code:
+    if not item_code:
         return ""
     return quantities_by_item_code.get(item_code, 0.0)
 
@@ -648,15 +643,13 @@ def print_table(rows: list[dict[str, Any]], fields: list[str]) -> None:
         print("No Purchase Receipt rows matched the query.")
         return
 
-    widths: dict[str, int] = {field: len(field) for field in fields}
+    widths = {field: len(field) for field in fields}
     for row in rows:
         for field in fields:
             widths[field] = max(widths[field], len(str(row.get(field, ""))))
 
-    header = " | ".join(field.ljust(widths[field]) for field in fields)
-    divider = "-+-".join("-" * widths[field] for field in fields)
-    print(header)
-    print(divider)
+    print(" | ".join(field.ljust(widths[field]) for field in fields))
+    print("-+-".join("-" * widths[field] for field in fields))
     for row in rows:
         print(" | ".join(str(row.get(field, "")).ljust(widths[field]) for field in fields))
 
@@ -671,17 +664,18 @@ def write_csv(rows: list[dict[str, Any]], fields: list[str], csv_path: Path) -> 
 
 
 def main() -> int:
-    parser = build_parser()
-    args = parser.parse_args()
+    args = build_parser().parse_args()
 
     if args.limit <= 0:
         raise SystemExit("--limit must be greater than 0.")
 
+    validate_sql_file(args.sql_file)
     project_root = Path(args.project_root).resolve()
     config = load_app_config(project_root)
     session = build_session(config.base_url, config.api_key, config.api_secret)
     filters = parse_filters(args.filters)
     rows = fetch_purchase_receipts(session, config.base_url, filters, args.limit)
+
     if args.csv_path:
         write_csv(rows, args.fields, Path(args.csv_path).resolve())
 
@@ -689,6 +683,7 @@ def main() -> int:
         print(json.dumps(rows, indent=2))
     else:
         print_table(rows, args.fields)
+        print(f"\nRows returned: {len(rows)}")
     return 0
 
 
@@ -697,7 +692,6 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except requests.HTTPError as exc:
         response = exc.response
-        body = ""
         if response is not None:
             body = response.text.strip()
             message = f"ERPNext request failed with HTTP {response.status_code}"
