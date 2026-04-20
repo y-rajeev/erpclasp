@@ -19,8 +19,8 @@ DEFAULT_FIELDS = [
     "receipt_type",
     "name",
     "supplier_name",
-    "supplier_delivery_note",
-    "custom_lot_no",
+    "delivery_note",
+    "lot_no",
     "posting_date",
     "item_code",
     "description",
@@ -50,6 +50,10 @@ _PARENT_FIELDS = [
     "custom_lot_no",
     "posting_date",
 ]
+_PARENT_FIELD_ALIASES = {
+    "supplier_delivery_note": "delivery_note",
+    "custom_lot_no": "lot_no",
+}
 _SUBCONTRACTING_STOCK_ENTRY_TYPES = ["Elongation", "Process Loss"]
 _API_PAGE_LIMIT = 1000
 _HAS_WARNED_BILLING_PERMISSION = False
@@ -352,9 +356,13 @@ def normalize_parent_row(
     row: dict[str, Any],
     doctype_name: str,
 ) -> dict[str, Any]:
+    renamed = {
+        _PARENT_FIELD_ALIASES.get(key, key): value
+        for key, value in row.items()
+    }
     return {
         "receipt_type": RECEIPT_TYPE_LABELS.get(doctype_name, doctype_name),
-        **row,
+        **renamed,
     }
 
 

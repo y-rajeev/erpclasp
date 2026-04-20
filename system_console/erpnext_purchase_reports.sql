@@ -6,8 +6,8 @@ WITH receipts AS (
         pri.name                                         AS receipt_item_name,
         pr.name,
         pr.supplier_name,
-        pr.supplier_delivery_note,
-        pr.custom_lot_no,
+        pr.supplier_delivery_note                        AS delivery_note,
+        pr.custom_lot_no                                 AS lot_no,
         pr.posting_date,
         pri.item_code,
         pri.description,
@@ -37,8 +37,8 @@ WITH receipts AS (
         scri.name                                          AS receipt_item_name,
         scr.name,
         scr.supplier_name,
-        scr.supplier_delivery_note,
-        scr.custom_lot_no,
+        scr.supplier_delivery_note                         AS delivery_note,
+        scr.custom_lot_no                                  AS lot_no,
         scr.posting_date,
         scri.item_code,
         scri.description,
@@ -152,8 +152,8 @@ SELECT
     r.receipt_type,
     r.name,
     r.supplier_name,
-    r.supplier_delivery_note,
-    r.custom_lot_no,
+    r.delivery_note,
+    r.lot_no,
     r.posting_date,
     r.item_code,
     r.description,
@@ -175,7 +175,8 @@ LEFT JOIN subcontracting_elongation se
 LEFT JOIN subcontracting_process_loss spl
     ON spl.receipt_name = r.name
    AND spl.item_code    = r.item_code
+WHERE r.lot_no IS NOT NULL
 ORDER BY
-    r.posting_date DESC,
-    r.name         DESC,
+    r.posting_date ASC,
+    r.name         ASC,
     r.item_code    ASC
