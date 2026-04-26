@@ -24,7 +24,7 @@ coverage.xml
 .env
 .erpclasp.json
 .erpclasp-map.json
-scripts/
+# scripts/
 
 # editor / os
 .idea/

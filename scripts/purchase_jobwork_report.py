@@ -1,4 +1,6 @@
-WITH receipts AS (
+def purchase_jobwork_report():
+    data = frappe.db.sql("""
+    WITH receipts AS (
 
     -- Purchase Receipts
     SELECT
@@ -207,3 +209,6 @@ ORDER BY
     r.posting_date ASC,
     r.name         ASC,
     r.item_code    ASC
+    """, as_dict=1)
+    return data
+frappe.response["message"] = purchase_jobwork_report()
