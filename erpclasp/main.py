@@ -33,6 +33,7 @@ from erpclasp.sync import (
     pull_scripts,
     push_scripts,
     register_script,
+    resolve_scripts_file,
     unmapped_local_scripts,
 )
 from erpclasp.utils import (
@@ -381,29 +382,34 @@ def pull_cmd(
 
 @app.command("push")
 def push_cmd(
+    file_path: Annotated[
+        str,
+        typer.Argument(
+            metavar="FILE_PATH",
+            help="Script file to upload, e.g. my_script.py or scripts/my_script.py.",
+        ),
+    ],
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Show what would be pushed without calling the API."),
     ] = False,
-    paths: Annotated[
-        list[str] | None,
-        typer.Argument(
-            help="Optional: only these basenames (e.g. foo.py). Omit to push all mapped scripts.",
-        ),
-    ] = None,
 ) -> None:
-    """Upload local `scripts/*.py` files to the server using the mapping file."""
+    """Upload one local `scripts/*.py` file to the server using the mapping file."""
     root, cfg = _get_project_and_config()
     client = FrappeClient(cfg)
-    only: set[str] | None = {Path(p).name for p in paths} if paths else None
-    if only:
-        sdir = scripts_dir(root)
-        missing = [fn for fn in only if not (sdir / fn).is_file()]
-        if missing:
-            console.print(f"[red]Not found under scripts/:[/red] {', '.join(sorted(missing))}")
-            raise typer.Exit(1)
     try:
-        results = push_scripts(client, root, dry_run=dry_run, only_filenames=only)
+        script_path = resolve_scripts_file(root, file_path)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    if script_path.parent != scripts_dir(root).resolve():
+        console.print("[red]Script file must be directly under scripts/.[/red]")
+        raise typer.Exit(1)
+    if not script_path.is_file():
+        console.print(f"[red]Not found under scripts/:[/red] {script_path.name}")
+        raise typer.Exit(1)
+    try:
+        results = push_scripts(client, root, dry_run=dry_run, only_filenames={script_path.name})
     except FrappeAPIError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc

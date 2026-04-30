@@ -64,10 +64,12 @@ From your **project root** (where `.env` and project files live):
 5. **Edit and push**
 
    ```bash
-   erpclasp push
-   erpclasp push my_script.py      # basename only
-   erpclasp push --dry-run
+   erpclasp push my_script.py
+   erpclasp push scripts/my_script.py
+   erpclasp push my_script.py --dry-run
    ```
+
+   `erpclasp push` without a file path is intentionally not supported, to avoid accidental updates to every mapped script.
 
    New local file ↔ ERP name:
 
