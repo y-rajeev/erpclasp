@@ -13,7 +13,6 @@ def get_last_purchase_rate():
             latest.uom,
             latest.purchase_order,
             latest.transaction_date,
-            latest.schedule_date,
             CURDATE() AS snapshot_date
 
         FROM (
@@ -25,7 +24,6 @@ def get_last_purchase_rate():
                 poi.uom,
                 po.name AS purchase_order,
                 po.transaction_date,
-                poi.schedule_date,
                 poi.idx
 
             FROM `tabPurchase Order` po
@@ -34,6 +32,8 @@ def get_last_purchase_rate():
 
             WHERE
                 po.docstatus = 1
+                AND po.is_subcontracted = 0
+                AND po.supplier_name NOT IN ('Suraaj Linens - Self')
                 AND IFNULL(poi.item_code, '') != ''
                 AND NOT EXISTS (
                     SELECT 1
@@ -42,6 +42,8 @@ def get_last_purchase_rate():
                         ON newer_poi.parent = newer_po.name
                     WHERE
                         newer_po.docstatus = 1
+                        AND newer_po.is_subcontracted = 0
+                        AND newer_po.supplier_name NOT IN ('Suraaj Linens - Self')
                         AND newer_po.supplier_name = po.supplier_name
                         AND newer_poi.item_code = poi.item_code
                         AND (

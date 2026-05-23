@@ -100,6 +100,7 @@ for new_item in (new_items or []):
             "warehouse": new_item.get("warehouse") or sales_order_doc.set_warehouse,
             "delivery_date": delivery_date,
             "schedule_date": schedule_date,
+            "custom_added_on": new_item.get("custom_added_on"),
             "rate": float(new_item.get("rate") or 0),
             "price_list_rate": float(new_item.get("price_list_rate") or 0),
         })

@@ -40,13 +40,26 @@ results = frappe.db.sql(sql_query, as_dict=True)
 
 branch_email_map = {
     "Mumbai": {
-        "recipients": ["yrajeev733@gmail.com"],
-        "cc": ["yrajeev5911@gmail.com"],
+        "recipients": ["sushant.jadhav@suraaj.com"],
+        "cc": [
+            "rajeshpjain@suraaj.com",
+            "varun@suraaj.com",
+            "sushma.jain@suraaj.com",
+            "mahesh.shinde@suraaj.com",
+            "ashirwad.dubey@suraaj.com",
+        ],
         "subject": "Need your attention - Mumbai",
     },
     "Karur": {
-        "recipients": ["mail.yrajeev@gmail.com"],
-        "cc": ["yrajeev5911@gmail.com"],
+        "recipients": ["karur@suraaj.com"],
+        "cc": [
+            "rajeshpjain@suraaj.com",
+            "varun@suraaj.com",
+            "sushma.jain@suraaj.com",
+            "mahesh.shinde@suraaj.com",
+            "r.rajeshkumar@suraaj.com",
+            "samiksha.golliwar@suraaj.com",
+        ],
         "subject": "Need your attention - Karur",
     },
 }
@@ -59,14 +72,10 @@ if results:
         branch_rows.setdefault(branch, []).append(row)
 
     for branch, rows_for_branch in branch_rows.items():
-        mail_config = branch_email_map.get(
-            branch,
-            {
-                "recipients": ["mail.yrajeev@gmail.com"],
-                "cc": ["yrajeev5911@gmail.com"],
-                "subject": f"Need your attention - {branch}",
-            },
-        )
+        mail_config = branch_email_map.get(branch)
+        if not mail_config:
+            log("No email configuration found for branch=" + branch)
+            continue
 
         rows = []
         rows.append("<div style='font-family:Segoe UI, Arial, sans-serif; color:#1f2937; background:#f4f7fb; padding:16px;'>")
